@@ -69,7 +69,7 @@ Pick two files to diff. All metadata keys are shown side-by-side, colour-coded: 
 |---------|---------|
 | `python-gobject` | GTK4/Libadwaita bindings |
 | `libadwaita` | Adwaita widget library |
-| `python-mat2` | Metadata parsing and removal |
+| `mat2` | Metadata parsing and removal |
 | `perl-image-exiftool` | Selective metadata field stripping |
 
 ## License
