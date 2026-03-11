@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Pikapika
+Comment=View and strip file metadata
+Exec=python3 /home/neil/dev/pikapika/pikapika.py
+Icon=document-properties
+Terminal=false
+Type=Application
+Categories=Utility;GTK;
+Keywords=metadata;exif;privacy;strip;
