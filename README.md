@@ -31,7 +31,7 @@ cd pikapika
 bash install.sh
 ```
 
-This installs the VeganStyle font, app icon, and desktop entry to `~/.local/`.
+This installs the app to `~/.local/share/pikapika/`, creates a `pikapika` command in `~/.local/bin/`, and adds a desktop entry, icon, and font to `~/.local/`. The cloned repo can be removed after install.
 
 ## Uninstall
 
@@ -42,10 +42,10 @@ bash uninstall.sh
 ## Usage
 
 ```bash
-python3 pikapika.py
+pikapika
 ```
 
-Or launch **Pikapika** from your application menu after running `install.sh`.
+Or launch **Pikapika** from your application menu.
 
 ### View Metadata
 
