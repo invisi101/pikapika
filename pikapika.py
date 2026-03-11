@@ -222,9 +222,9 @@ dialog {
     background-color: #1a1a2e;
     border: 1px solid alpha(#818cf8, 0.2);
     border-radius: 16px;
-    padding: 32px 24px;
+    padding: 26px 20px;
     transition: all 200ms ease;
-    min-width: 220px;
+    min-width: 200px;
 }
 
 .mode-card:hover {
@@ -245,12 +245,12 @@ dialog {
 .mode-card-title {
     color: #e0e0ff;
     font-weight: 700;
-    font-size: 16px;
+    font-size: 18px;
 }
 
 .mode-card-subtitle {
     color: alpha(#c4c4f0, 0.6);
-    font-size: 12px;
+    font-size: 14px;
 }
 
 /* ---- Metadata rows ---- */
