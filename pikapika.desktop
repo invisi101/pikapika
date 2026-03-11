@@ -1,8 +1,8 @@
 [Desktop Entry]
 Name=Pikapika
 Comment=View and strip file metadata
-Exec=python3 /home/neil/dev/pikapika/pikapika.py
-Icon=/home/neil/dev/pikapika/assets/pikapika.svg
+Exec=python3 PIKAPIKA_PATH/pikapika.py
+Icon=PIKAPIKA_PATH/assets/pikapika.svg
 Terminal=false
 Type=Application
 Categories=Utility;GTK;

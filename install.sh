@@ -32,7 +32,8 @@ echo "Icon installed to $ICON_DIR"
 # Install desktop entry (patch icon path to use system icon name)
 DESKTOP_DIR="$HOME/.local/share/applications"
 mkdir -p "$DESKTOP_DIR"
-sed 's|^Icon=.*|Icon=pikapika|' "$SCRIPT_DIR/pikapika.desktop" > "$DESKTOP_DIR/pikapika.desktop"
+sed -e "s|PIKAPIKA_PATH|$SCRIPT_DIR|g" -e 's|^Icon=.*|Icon=pikapika|' "$SCRIPT_DIR/pikapika.desktop" > "$DESKTOP_DIR/pikapika.desktop"
+chmod +x "$SCRIPT_DIR/pikapika.py"
 echo "Desktop entry installed to $DESKTOP_DIR"
 
 echo "Pikapika installed successfully."
