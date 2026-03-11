@@ -1,0 +1,66 @@
+# Pikapika
+
+**File metadata viewer & stripper** — a GTK4/Libadwaita app to inspect and remove metadata from images, documents, and other files.
+
+<p align="center">
+  <img src="assets/pikapika.svg" width="200" alt="Pikapika">
+</p>
+
+## Features
+
+| Mode | Description |
+|------|-------------|
+| **View Metadata** | Open a single file, inspect all metadata fields with checkboxes, selectively strip chosen fields via exiftool |
+| **Strip Metadata** | Bulk-select multiple files, remove all metadata at once via mat2 |
+
+- Neon dark theme matching the [DD-imager](https://github.com/invisi101/DD-imager) / [bigsnatch](https://github.com/invisi101/bigsnatch) aesthetic
+- Selective field stripping powered by [exiftool](https://exiftool.org/)
+- Full metadata removal powered by [mat2](https://0xacab.org/jvoisin/mat2)
+- Confirmation dialogs before any destructive operation
+- Per-file success/failure reporting for bulk operations
+- Graceful handling of unsupported file types and empty metadata
+
+## Install
+
+```bash
+git clone https://github.com/invisi101/pikapika.git
+cd pikapika
+bash install.sh
+```
+
+This installs the VeganStyle font, app icon, and desktop entry to `~/.local/`.
+
+## Uninstall
+
+```bash
+bash uninstall.sh
+```
+
+## Usage
+
+```bash
+python3 pikapika.py
+```
+
+Or launch **Pikapika** from your application menu after running `install.sh`.
+
+### View Metadata
+
+Select a file to inspect. All metadata fields are listed with checkboxes. Use **Select All** / **Deselect All** to toggle, then **Strip Selected** to remove only the chosen fields. Requires `exiftool` for selective stripping — if unavailable, offers a mat2 fallback that strips everything.
+
+### Strip Metadata
+
+Select one or more files. Review the file list, then **Strip All Metadata** to remove everything. Uses mat2 under the hood — replaces each file in-place with its cleaned version.
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `python-gobject` | GTK4/Libadwaita bindings |
+| `libadwaita` | Adwaita widget library |
+| `python-mat2` | Metadata parsing and removal |
+| `perl-image-exiftool` | Selective metadata field stripping |
+
+## License
+
+[GPL-3.0](LICENSE)

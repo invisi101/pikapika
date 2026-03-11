@@ -2,7 +2,7 @@
 Name=Pikapika
 Comment=View and strip file metadata
 Exec=python3 /home/neil/dev/pikapika/pikapika.py
-Icon=document-properties
+Icon=/home/neil/dev/pikapika/assets/pikapika.svg
 Terminal=false
 Type=Application
 Categories=Utility;GTK;
