@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pikapika — Metadata Viewer & Stripper."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -323,6 +324,75 @@ checkbutton label {
     color: #f87171;
     font-weight: 600;
 }
+
+/* ---- Audit rows ---- */
+.audit-row {
+    background-color: #16213e;
+    border: 1px solid alpha(#818cf8, 0.1);
+    border-radius: 8px;
+    padding: 8px 14px;
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+.audit-clean {
+    color: #34d399;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.audit-dirty {
+    color: #f472b6;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+.audit-unsupported {
+    color: alpha(#c4c4f0, 0.4);
+    font-size: 12px;
+}
+
+.audit-field-count {
+    color: #818cf8;
+    font-weight: 600;
+    font-size: 12px;
+}
+
+/* ---- Compare columns ---- */
+.compare-header {
+    background-color: #16213e;
+    border: 1px solid alpha(#818cf8, 0.15);
+    border-radius: 8px;
+    padding: 10px 14px;
+}
+
+.compare-only-a {
+    color: #f472b6;
+}
+
+.compare-only-b {
+    color: #06b6d4;
+}
+
+.compare-diff {
+    color: #fbbf24;
+}
+
+.compare-same {
+    color: alpha(#c4c4f0, 0.4);
+}
+
+/* ---- Summary stats ---- */
+.stat-number {
+    color: #818cf8;
+    font-weight: 800;
+    font-size: 28px;
+}
+
+.stat-label {
+    color: alpha(#c4c4f0, 0.6);
+    font-size: 12px;
+}
 """
 
 
@@ -364,6 +434,7 @@ class PikapikaApp(Adw.Application):
 
         # State
         self.current_file = None
+        self.current_meta = {}  # flat metadata dict for current file
         self.meta_checks = {}  # key -> CheckButton
         self.strip_files = []  # list of file paths for bulk strip
 
@@ -388,6 +459,8 @@ class PikapikaApp(Adw.Application):
         self.stack.add_named(self._build_view_result_page(), 'view-result')
         self.stack.add_named(self._build_strip_confirm_page(), 'strip-confirm')
         self.stack.add_named(self._build_strip_result_page(), 'strip-result')
+        self.stack.add_named(self._build_audit_page(), 'audit')
+        self.stack.add_named(self._build_compare_page(), 'compare')
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.append(self.header)
@@ -418,7 +491,9 @@ class PikapikaApp(Adw.Application):
                                    {'view-metadata': 'View Metadata',
                                     'view-result': 'Result',
                                     'strip-confirm': 'Strip Metadata',
-                                    'strip-result': 'Result'}.get(page_name, 'Pikapika'))
+                                    'strip-result': 'Result',
+                                    'audit': 'Folder Audit',
+                                    'compare': 'Compare Metadata'}.get(page_name, 'Pikapika'))
         self.stack.set_visible_child_name(page_name)
 
     def _go_home(self):
@@ -429,83 +504,74 @@ class PikapikaApp(Adw.Application):
     def _build_welcome_page(self):
         page = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
-            halign=Gtk.Align.CENTER,
-            valign=Gtk.Align.CENTER,
-            spacing=32,
+            spacing=0,
         )
 
+        # Title top-left in VeganStyle font, pink like bigsnatch
         heading = Gtk.Label()
         heading.set_markup(
-            '<span font_family="Vegan Style Personal Use" size="xxx-large">Pikapika</span>'
+            '<span font_family="Vegan Style Personal Use" size="30000" foreground="#f472b6">Pikapika</span>'
         )
-        heading.add_css_class('title-1')
+        heading.set_halign(Gtk.Align.START)
+        heading.set_margin_start(24)
+        heading.set_margin_top(16)
         page.append(heading)
 
-        subtitle = Gtk.Label(label='What would you like to do?')
-        subtitle.add_css_class('dim-label')
-        page.append(subtitle)
-
-        cards_row = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
+        # Cards centered in remaining space — 2x2 grid
+        cards_grid = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
             halign=Gtk.Align.CENTER,
-            spacing=24,
+            valign=Gtk.Align.CENTER,
+            spacing=16,
+            vexpand=True,
         )
 
-        # View Metadata card
-        view_card = Gtk.Button()
-        view_card.add_css_class('mode-card')
-        view_card.set_has_frame(False)
-        view_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                           halign=Gtk.Align.CENTER)
+        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=16)
+        bottom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=16)
 
-        view_icon = Gtk.Label()
-        view_icon.add_css_class('mode-card-icon')
-        view_icon.set_markup('<span size="xx-large" weight="bold">\U0001f50d</span>')
-        view_box.append(view_icon)
+        def _make_card(icon_markup, title, subtitle, callback):
+            card = Gtk.Button()
+            card.add_css_class('mode-card')
+            card.set_has_frame(False)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+                          halign=Gtk.Align.CENTER)
+            icon = Gtk.Label()
+            icon.add_css_class('mode-card-icon')
+            icon.set_markup(icon_markup)
+            box.append(icon)
+            t = Gtk.Label(label=title)
+            t.add_css_class('mode-card-title')
+            box.append(t)
+            s = Gtk.Label(label=subtitle)
+            s.add_css_class('mode-card-subtitle')
+            s.set_wrap(True)
+            s.set_max_width_chars(22)
+            s.set_justify(Gtk.Justification.CENTER)
+            box.append(s)
+            card.set_child(box)
+            card.connect('clicked', lambda _b: callback())
+            return card
 
-        view_title = Gtk.Label(label='View Metadata')
-        view_title.add_css_class('mode-card-title')
-        view_box.append(view_title)
+        top_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\U0001f50d</span>',
+            'View Metadata', 'Inspect and selectively strip metadata fields',
+            self._on_view_metadata))
+        top_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\u2702</span>',
+            'Strip Metadata', 'Remove all metadata from one or more files',
+            self._on_strip_metadata))
+        bottom_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\U0001f4c1</span>',
+            'Folder Audit', 'Scan a folder for files containing metadata',
+            self._on_folder_audit))
+        bottom_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\u2194</span>',
+            'Compare', 'Side-by-side metadata diff of two files',
+            self._on_compare_metadata))
 
-        view_sub = Gtk.Label(label='Inspect and selectively strip metadata fields')
-        view_sub.add_css_class('mode-card-subtitle')
-        view_sub.set_wrap(True)
-        view_sub.set_max_width_chars(25)
-        view_sub.set_justify(Gtk.Justification.CENTER)
-        view_box.append(view_sub)
-
-        view_card.set_child(view_box)
-        view_card.connect('clicked', lambda _b: self._on_view_metadata())
-        cards_row.append(view_card)
-
-        # Strip Metadata card
-        strip_card = Gtk.Button()
-        strip_card.add_css_class('mode-card')
-        strip_card.set_has_frame(False)
-        strip_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
-                            halign=Gtk.Align.CENTER)
-
-        strip_icon = Gtk.Label()
-        strip_icon.add_css_class('mode-card-icon')
-        strip_icon.set_markup('<span size="xx-large" weight="bold">\u2702</span>')
-        strip_box.append(strip_icon)
-
-        strip_title = Gtk.Label(label='Strip Metadata')
-        strip_title.add_css_class('mode-card-title')
-        strip_box.append(strip_title)
-
-        strip_sub = Gtk.Label(label='Remove all metadata from one or more files')
-        strip_sub.add_css_class('mode-card-subtitle')
-        strip_sub.set_wrap(True)
-        strip_sub.set_max_width_chars(25)
-        strip_sub.set_justify(Gtk.Justification.CENTER)
-        strip_box.append(strip_sub)
-
-        strip_card.set_child(strip_box)
-        strip_card.connect('clicked', lambda _b: self._on_strip_metadata())
-        cards_row.append(strip_card)
-
-        page.append(cards_row)
+        cards_grid.append(top_row)
+        cards_grid.append(bottom_row)
+        page.append(cards_grid)
         return page
 
     # ---- View Metadata Page ----
@@ -550,6 +616,16 @@ class PikapikaApp(Adw.Application):
         self.btn_deselect_all.add_css_class('pill')
         self.btn_deselect_all.connect('clicked', lambda _b: self._toggle_all_checks(False))
         btn_row.append(self.btn_deselect_all)
+
+        spacer = Gtk.Box(hexpand=True)
+        btn_row.append(spacer)
+
+        self.btn_export = Gtk.Button(label='Export JSON')
+        self.btn_export.add_css_class('pill')
+        self.btn_export.add_css_class('suggested-action')
+        self.btn_export.set_sensitive(False)
+        self.btn_export.connect('clicked', lambda _b: self._on_export_json())
+        btn_row.append(self.btn_export)
 
         page.append(btn_row)
 
@@ -745,6 +821,7 @@ class PikapikaApp(Adw.Application):
         self.btn_strip_selected.set_sensitive(False)
         self.btn_select_all.set_sensitive(False)
         self.btn_deselect_all.set_sensitive(False)
+        self.btn_export.set_sensitive(False)
         self._navigate('view-metadata')
 
         def worker():
@@ -780,10 +857,15 @@ class PikapikaApp(Adw.Application):
         self.view_mime_label.set_label(mtype or '')
 
         if not meta:
-            self.view_status_label.set_label('No metadata found')
+            self.current_meta = {}
+            self.view_status_label.set_markup(
+                '<span size="x-large" foreground="#e0e0ff" weight="bold">No metadata found</span>'
+            )
             self.view_status_label.remove_css_class('error')
-            self.view_status_label.add_css_class('dim-label')
+            self.view_status_label.remove_css_class('dim-label')
             self.view_status_label.set_visible(True)
+            self.view_status_label.set_vexpand(True)
+            self.view_status_label.set_valign(Gtk.Align.CENTER)
             return
 
         # Flatten nested dicts
@@ -794,6 +876,8 @@ class PikapikaApp(Adw.Application):
                     flat[f'{k}.{sk}'] = str(sv)
             else:
                 flat[k] = str(v)
+
+        self.current_meta = flat
 
         for key, value in flat.items():
             row = Gtk.Box(
@@ -825,6 +909,7 @@ class PikapikaApp(Adw.Application):
         self.btn_strip_selected.set_sensitive(True)
         self.btn_select_all.set_sensitive(True)
         self.btn_deselect_all.set_sensitive(True)
+        self.btn_export.set_sensitive(True)
 
     def _toggle_all_checks(self, state):
         for check in self.meta_checks.values():
@@ -1076,6 +1161,525 @@ class PikapikaApp(Adw.Application):
             self.strip_result_list.append(row)
 
         self._navigate('strip-result')
+
+    # ---- Export JSON ----
+
+    def _on_export_json(self):
+        if not self.current_meta or not self.current_file:
+            return
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Save metadata as JSON')
+        stem = Path(self.current_file).stem
+        dialog.set_initial_name(f'{stem}_metadata.json')
+        dialog.save(self.win, None, self._on_export_save)
+
+    def _on_export_save(self, dialog, result):
+        try:
+            gfile = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path = gfile.get_path()
+        export = {
+            'file': self.current_file,
+            'metadata': self.current_meta,
+        }
+        try:
+            with open(path, 'w') as f:
+                json.dump(export, f, indent=2, ensure_ascii=False)
+            self._show_view_result(True, 'Metadata exported', path)
+        except Exception as e:
+            self._show_view_result(False, 'Export failed', str(e))
+
+    # ---- Folder Audit ----
+
+    def _on_folder_audit(self):
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Select a folder to audit')
+        dialog.select_folder(self.win, None, self._on_audit_folder_chosen)
+
+    def _on_audit_folder_chosen(self, dialog, result):
+        try:
+            gfile = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        folder = gfile.get_path()
+        self._navigate('audit')
+        self._run_audit(folder)
+
+    def _build_audit_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # Summary bar
+        self.audit_summary = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.CENTER,
+            spacing=32,
+            margin_top=16, margin_bottom=8,
+        )
+        page.append(self.audit_summary)
+
+        self.audit_folder_label = Gtk.Label(
+            label='',
+            halign=Gtk.Align.START,
+            margin_start=20, margin_end=20, margin_bottom=4,
+        )
+        self.audit_folder_label.add_css_class('dim-label')
+        self.audit_folder_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        page.append(self.audit_folder_label)
+
+        page.append(Gtk.Separator())
+
+        # Spinner
+        self.audit_spinner = Gtk.Spinner(halign=Gtk.Align.CENTER, margin_top=16)
+        self.audit_spinner.set_size_request(32, 32)
+        self.audit_spinner.set_visible(False)
+        page.append(self.audit_spinner)
+
+        self.audit_progress_label = Gtk.Label(
+            label='', halign=Gtk.Align.CENTER, margin_top=4,
+        )
+        self.audit_progress_label.add_css_class('dim-label')
+        self.audit_progress_label.set_visible(False)
+        page.append(self.audit_progress_label)
+
+        # Scrollable results
+        scrolled = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            margin_top=8, margin_bottom=8, margin_start=16, margin_end=16,
+        )
+        self.audit_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+            margin_top=4, margin_bottom=4, margin_start=4, margin_end=4,
+        )
+        scrolled.set_child(self.audit_list)
+        page.append(scrolled)
+
+        # Bottom buttons
+        btn_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.CENTER,
+            spacing=12,
+            margin_bottom=16,
+        )
+        btn_home = Gtk.Button(label='Back to Home')
+        btn_home.add_css_class('suggested-action')
+        btn_home.add_css_class('pill')
+        btn_home.connect('clicked', lambda _b: self._go_home())
+        btn_row.append(btn_home)
+
+        self.btn_audit_export = Gtk.Button(label='Export Report')
+        self.btn_audit_export.add_css_class('pill')
+        self.btn_audit_export.set_sensitive(False)
+        self.btn_audit_export.connect('clicked', lambda _b: self._on_audit_export())
+        btn_row.append(self.btn_audit_export)
+
+        page.append(btn_row)
+        return page
+
+    def _run_audit(self, folder):
+        # Clear previous
+        while child := self.audit_list.get_first_child():
+            self.audit_list.remove(child)
+        while child := self.audit_summary.get_first_child():
+            self.audit_summary.remove(child)
+        self.audit_folder_label.set_label(folder)
+        self.audit_spinner.set_visible(True)
+        self.audit_spinner.start()
+        self.audit_progress_label.set_visible(True)
+        self.audit_progress_label.set_label('Scanning...')
+        self.btn_audit_export.set_sensitive(False)
+        self.audit_results = []
+
+        def worker():
+            results = []
+            files = [f for f in Path(folder).rglob('*') if f.is_file()]
+            total = len(files)
+            for i, filepath in enumerate(files):
+                if i % 10 == 0:
+                    GLib.idle_add(self.audit_progress_label.set_label,
+                                  f'Scanning {i+1}/{total}...')
+                try:
+                    parser, mtype = parser_factory.get_parser(str(filepath))
+                    if parser is None:
+                        results.append((str(filepath), 'unsupported', mtype, 0))
+                        continue
+                    meta = parser.get_meta()
+                    # Flatten
+                    count = 0
+                    for k, v in meta.items():
+                        if isinstance(v, dict):
+                            count += len(v)
+                        else:
+                            count += 1
+                    if count > 0:
+                        results.append((str(filepath), 'dirty', mtype, count))
+                    else:
+                        results.append((str(filepath), 'clean', mtype, 0))
+                except Exception:
+                    results.append((str(filepath), 'unsupported', None, 0))
+            GLib.idle_add(self._show_audit_results, results, folder)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_audit_results(self, results, folder):
+        self.audit_spinner.stop()
+        self.audit_spinner.set_visible(False)
+        self.audit_progress_label.set_visible(False)
+        self.audit_results = results
+
+        dirty = [r for r in results if r[1] == 'dirty']
+        clean = [r for r in results if r[1] == 'clean']
+        unsupported = [r for r in results if r[1] == 'unsupported']
+
+        # Summary stats
+        for count, label, color in [
+            (len(results), 'Total', '#818cf8'),
+            (len(dirty), 'With Metadata', '#f472b6'),
+            (len(clean), 'Clean', '#34d399'),
+            (len(unsupported), 'Unsupported', '#c4c4f0'),
+        ]:
+            stat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, spacing=2)
+            num = Gtk.Label()
+            num.set_markup(f'<span foreground="{color}" weight="heavy" size="x-large">{count}</span>')
+            stat.append(num)
+            lbl = Gtk.Label(label=label)
+            lbl.add_css_class('stat-label')
+            stat.append(lbl)
+            self.audit_summary.append(stat)
+
+        # Sort: dirty first, then clean, then unsupported
+        sorted_results = sorted(results, key=lambda r: {'dirty': 0, 'clean': 1, 'unsupported': 2}[r[1]])
+
+        base = Path(folder)
+        for filepath, status, mtype, count in sorted_results:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            row.add_css_class('audit-row')
+
+            # Status icon
+            icon = Gtk.Label()
+            if status == 'dirty':
+                icon.set_markup('<span foreground="#f472b6">\u26a0</span>')
+            elif status == 'clean':
+                icon.set_markup('<span foreground="#34d399">\u2714</span>')
+            else:
+                icon.set_markup('<span foreground="#555">\u2014</span>')
+            row.append(icon)
+
+            # File info
+            info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1, hexpand=True)
+            try:
+                rel = str(Path(filepath).relative_to(base))
+            except ValueError:
+                rel = filepath
+            name_lbl = Gtk.Label(label=rel, halign=Gtk.Align.START)
+            name_lbl.add_css_class('file-item-name')
+            name_lbl.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            info.append(name_lbl)
+            row.append(info)
+
+            # Status / count
+            tag = Gtk.Label(halign=Gtk.Align.END)
+            if status == 'dirty':
+                tag.set_label(f'{count} fields')
+                tag.add_css_class('audit-dirty')
+            elif status == 'clean':
+                tag.set_label('Clean')
+                tag.add_css_class('audit-clean')
+            else:
+                tag.set_label('Unsupported')
+                tag.add_css_class('audit-unsupported')
+            row.append(tag)
+
+            self.audit_list.append(row)
+
+        self.btn_audit_export.set_sensitive(True)
+
+    def _on_audit_export(self):
+        if not self.audit_results:
+            return
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Save audit report as JSON')
+        dialog.set_initial_name('audit_report.json')
+        dialog.save(self.win, None, self._on_audit_export_save)
+
+    def _on_audit_export_save(self, dialog, result):
+        try:
+            gfile = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path = gfile.get_path()
+        report = {
+            'folder': self.audit_folder_label.get_label(),
+            'files': [
+                {'path': r[0], 'status': r[1], 'mimetype': r[2], 'field_count': r[3]}
+                for r in self.audit_results
+            ],
+        }
+        try:
+            with open(path, 'w') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    # ---- Compare Metadata ----
+
+    def _on_compare_metadata(self):
+        self.compare_file_a = None
+        self.compare_file_b = None
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Select first file')
+        dialog.open(self.win, None, self._on_compare_file_a_chosen)
+
+    def _on_compare_file_a_chosen(self, dialog, result):
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        self.compare_file_a = gfile.get_path()
+        dialog2 = Gtk.FileDialog()
+        dialog2.set_title('Select second file')
+        dialog2.open(self.win, None, self._on_compare_file_b_chosen)
+
+    def _on_compare_file_b_chosen(self, dialog, result):
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        self.compare_file_b = gfile.get_path()
+        self._navigate('compare')
+        self._run_compare()
+
+    def _build_compare_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # File headers
+        self.compare_header_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            margin_top=12, margin_bottom=8, margin_start=16, margin_end=16,
+        )
+        self.compare_label_a = Gtk.Label(label='', halign=Gtk.Align.START, hexpand=True)
+        self.compare_label_a.add_css_class('heading')
+        self.compare_label_a.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.compare_header_box.append(self.compare_label_a)
+
+        vs_label = Gtk.Label(label='vs')
+        vs_label.add_css_class('dim-label')
+        self.compare_header_box.append(vs_label)
+
+        self.compare_label_b = Gtk.Label(label='', halign=Gtk.Align.END, hexpand=True)
+        self.compare_label_b.add_css_class('heading')
+        self.compare_label_b.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.compare_header_box.append(self.compare_label_b)
+
+        page.append(self.compare_header_box)
+        page.append(Gtk.Separator())
+
+        # Legend
+        legend = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=16,
+            halign=Gtk.Align.CENTER,
+            margin_top=8, margin_bottom=4,
+        )
+        for label, css_cls in [('Different', 'compare-diff'), ('Only in A', 'compare-only-a'),
+                                ('Only in B', 'compare-only-b'), ('Same', 'compare-same')]:
+            lbl = Gtk.Label(label=f'\u25cf {label}')
+            lbl.add_css_class(css_cls)
+            legend.append(lbl)
+        page.append(legend)
+
+        # Spinner
+        self.compare_spinner = Gtk.Spinner(halign=Gtk.Align.CENTER, margin_top=8)
+        self.compare_spinner.set_size_request(32, 32)
+        self.compare_spinner.set_visible(False)
+        page.append(self.compare_spinner)
+
+        # Scrollable diff list
+        scrolled = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            margin_top=4, margin_bottom=8, margin_start=16, margin_end=16,
+        )
+        self.compare_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+            margin_top=4, margin_bottom=4, margin_start=4, margin_end=4,
+        )
+        scrolled.set_child(self.compare_list)
+        page.append(scrolled)
+
+        # Buttons
+        btn_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.CENTER,
+            spacing=12,
+            margin_bottom=16,
+        )
+        btn_home = Gtk.Button(label='Back to Home')
+        btn_home.add_css_class('suggested-action')
+        btn_home.add_css_class('pill')
+        btn_home.connect('clicked', lambda _b: self._go_home())
+        btn_row.append(btn_home)
+
+        self.btn_compare_export = Gtk.Button(label='Export Diff')
+        self.btn_compare_export.add_css_class('pill')
+        self.btn_compare_export.set_sensitive(False)
+        self.btn_compare_export.connect('clicked', lambda _b: self._on_compare_export())
+        btn_row.append(self.btn_compare_export)
+
+        page.append(btn_row)
+        return page
+
+    def _run_compare(self):
+        while child := self.compare_list.get_first_child():
+            self.compare_list.remove(child)
+
+        self.compare_label_a.set_label(Path(self.compare_file_a).name)
+        self.compare_label_b.set_label(Path(self.compare_file_b).name)
+        self.compare_spinner.set_visible(True)
+        self.compare_spinner.start()
+        self.btn_compare_export.set_sensitive(False)
+        self.compare_diff_data = {}
+
+        def _get_flat_meta(filepath):
+            parser, mtype = parser_factory.get_parser(filepath)
+            if parser is None:
+                return {}
+            meta = parser.get_meta()
+            flat = {}
+            for k, v in meta.items():
+                if isinstance(v, dict):
+                    for sk, sv in v.items():
+                        flat[f'{k}.{sk}'] = str(sv)
+                else:
+                    flat[k] = str(v)
+            return flat
+
+        def worker():
+            try:
+                meta_a = _get_flat_meta(self.compare_file_a)
+                meta_b = _get_flat_meta(self.compare_file_b)
+                GLib.idle_add(self._show_compare, meta_a, meta_b)
+            except Exception as e:
+                GLib.idle_add(self._show_compare_error, str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_compare_error(self, msg):
+        self.compare_spinner.stop()
+        self.compare_spinner.set_visible(False)
+        lbl = Gtk.Label(label=msg)
+        lbl.add_css_class('error')
+        self.compare_list.append(lbl)
+
+    def _show_compare(self, meta_a, meta_b):
+        self.compare_spinner.stop()
+        self.compare_spinner.set_visible(False)
+
+        all_keys = sorted(set(meta_a.keys()) | set(meta_b.keys()))
+        diff_data = []
+
+        for key in all_keys:
+            in_a = key in meta_a
+            in_b = key in meta_b
+            val_a = meta_a.get(key, '')
+            val_b = meta_b.get(key, '')
+
+            if in_a and in_b and val_a == val_b:
+                status = 'same'
+            elif in_a and in_b:
+                status = 'diff'
+            elif in_a:
+                status = 'only_a'
+            else:
+                status = 'only_b'
+
+            diff_data.append((key, val_a, val_b, status))
+
+        self.compare_diff_data = diff_data
+
+        # Sort: diff first, only_a, only_b, same last
+        order = {'diff': 0, 'only_a': 1, 'only_b': 2, 'same': 3}
+        diff_data.sort(key=lambda x: order[x[3]])
+
+        for key, val_a, val_b, status in diff_data:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            row.add_css_class('meta-row')
+
+            # Key label with status color
+            key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            status_dot = Gtk.Label()
+            css = {'diff': 'compare-diff', 'only_a': 'compare-only-a',
+                   'only_b': 'compare-only-b', 'same': 'compare-same'}[status]
+            status_dot.set_markup(f'<span foreground="">●</span>')
+            status_dot.add_css_class(css)
+            key_row.append(status_dot)
+
+            key_lbl = Gtk.Label(label=key, halign=Gtk.Align.START)
+            key_lbl.add_css_class('meta-key')
+            key_row.append(key_lbl)
+            row.append(key_row)
+
+            # Values side by side
+            vals_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+            a_lbl = Gtk.Label(label=val_a or '\u2014', halign=Gtk.Align.START, hexpand=True)
+            a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            a_lbl.set_xalign(0)
+            if status == 'only_b':
+                a_lbl.add_css_class('dim-label')
+            else:
+                a_lbl.add_css_class('meta-value')
+            vals_row.append(a_lbl)
+
+            sep = Gtk.Label(label='\u2502')
+            sep.add_css_class('dim-label')
+            vals_row.append(sep)
+
+            b_lbl = Gtk.Label(label=val_b or '\u2014', halign=Gtk.Align.START, hexpand=True)
+            b_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            b_lbl.set_xalign(0)
+            if status == 'only_a':
+                b_lbl.add_css_class('dim-label')
+            else:
+                b_lbl.add_css_class('meta-value')
+            vals_row.append(b_lbl)
+
+            row.append(vals_row)
+            self.compare_list.append(row)
+
+        self.btn_compare_export.set_sensitive(True)
+
+    def _on_compare_export(self):
+        if not self.compare_diff_data:
+            return
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Save comparison as JSON')
+        dialog.set_initial_name('metadata_diff.json')
+        dialog.save(self.win, None, self._on_compare_export_save)
+
+    def _on_compare_export_save(self, dialog, result):
+        try:
+            gfile = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path = gfile.get_path()
+        report = {
+            'file_a': self.compare_file_a,
+            'file_b': self.compare_file_b,
+            'diff': [
+                {'key': k, 'value_a': a, 'value_b': b, 'status': s}
+                for k, a, b, s in self.compare_diff_data
+            ],
+        }
+        try:
+            with open(path, 'w') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
 
 def main():
