@@ -57,7 +57,7 @@ Select one or more files. Review the file list, then **Strip All Metadata** to r
 
 ### Folder Audit
 
-Select a directory to scan recursively. Every file is checked for metadata and categorised as clean, containing metadata (with field count), or unsupported. Summary stats at the top, exportable report.
+Select a directory to scan recursively. Every file is checked for metadata and categorised as clean, containing metadata (with field count), or unsupported. Summary stats at the top, exportable report. Double-click any file to jump straight to the View Metadata page.
 
 ### Compare Metadata
 

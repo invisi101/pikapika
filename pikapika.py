@@ -1392,9 +1392,20 @@ class PikapikaApp(Adw.Application):
                 tag.add_css_class('audit-unsupported')
             row.append(tag)
 
+            # Double-click to view metadata (only for supported files)
+            if status != 'unsupported':
+                gesture = Gtk.GestureClick(button=1)
+                gesture.connect('released', self._on_audit_row_double_click, filepath)
+                row.add_controller(gesture)
+
             self.audit_list.append(row)
 
         self.btn_audit_export.set_sensitive(True)
+
+    def _on_audit_row_double_click(self, gesture, n_press, x, y, filepath):
+        if n_press == 2:
+            self.current_file = filepath
+            self._load_metadata(filepath)
 
     def _on_audit_export(self):
         if not self.audit_results:
