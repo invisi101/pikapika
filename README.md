@@ -15,7 +15,6 @@
 | **Folder Audit** | Recursively scan a directory and flag every file that contains metadata |
 | **Compare** | Side-by-side metadata diff of two files, colour-coded by status |
 
-- Neon dark theme matching the [DD-imager](https://github.com/invisi101/DD-imager) / [bigsnatch](https://github.com/invisi101/bigsnatch) aesthetic
 - Selective field stripping powered by [exiftool](https://exiftool.org/)
 - Full metadata removal powered by [mat2](https://0xacab.org/jvoisin/mat2)
 - Export metadata or reports to JSON from any mode
