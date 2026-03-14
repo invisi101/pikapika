@@ -11,9 +11,51 @@ from pathlib import Path
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio, GLib, Pango, PangoCairo
+from gi.repository import Gtk, Adw, Gio, GLib, Pango, PangoCairo, Gdk
 
 from libmat2 import parser_factory
+
+
+# ---- Exiftool tag group mapping ----
+
+_MAT2_TO_EXIFTOOL_GROUP = {
+    'Exif': 'EXIF',
+    'Xmp': 'XMP',
+    'Iptc': 'IPTC',
+    'Icc': 'ICC_Profile',
+    'Pdf': 'PDF',
+    'Photoshop': 'Photoshop',
+}
+
+
+def _mat2_key_to_exiftool_arg(key):
+    """Convert mat2-style key like 'Exif.Image.Make' to exiftool arg like '-EXIF:Make='."""
+    parts = key.split('.')
+    if len(parts) >= 2:
+        group = _MAT2_TO_EXIFTOOL_GROUP.get(parts[0])
+        tag = parts[-1]
+        if group:
+            return f'-{group}:{tag}='
+    tag = parts[-1] if '.' in key else key
+    return f'-{tag}='
+
+
+# ---- Config persistence ----
+
+_CONFIG_DIR = Path.home() / '.config' / 'pikapika'
+_CONFIG_FILE = _CONFIG_DIR / 'config.json'
+
+
+def _load_config():
+    try:
+        return json.loads(_CONFIG_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_config(config):
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _CONFIG_FILE.write_text(json.dumps(config, indent=2))
 
 
 CUSTOM_CSS = """
@@ -437,6 +479,9 @@ class PikapikaApp(Adw.Application):
         self.current_meta = {}  # flat metadata dict for current file
         self.meta_checks = {}  # key -> CheckButton
         self.strip_files = []  # list of file paths for bulk strip
+        self._audit_cancel = threading.Event()
+        self._compare_rows = []  # (row_widget, status) for hide-identical
+        self._audit_dirty_files = []  # for batch strip
 
         # Header bar
         self.header = Adw.HeaderBar()
@@ -444,9 +489,10 @@ class PikapikaApp(Adw.Application):
         self.header.set_title_widget(self.title_label)
 
         self.btn_back = Gtk.Button(icon_name='go-previous-symbolic')
-        self.btn_back.connect('clicked', lambda _b: self._go_home())
+        self.btn_back.connect('clicked', lambda _b: self._go_back())
         self.btn_back.set_visible(False)
         self.header.pack_start(self.btn_back)
+        self._nav_history = []
 
         # Stack
         self.stack = Gtk.Stack()
@@ -465,7 +511,11 @@ class PikapikaApp(Adw.Application):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.append(self.header)
         vbox.append(self.stack)
-        self.win.set_content(vbox)
+
+        # Toast overlay wraps the main content
+        self.toast_overlay = Adw.ToastOverlay()
+        self.toast_overlay.set_child(vbox)
+        self.win.set_content(self.toast_overlay)
 
         self.stack.set_visible_child_name('welcome')
         self.win.present()
@@ -473,7 +523,6 @@ class PikapikaApp(Adw.Application):
     # ---- CSS ----
 
     def _load_css(self):
-        from gi.repository import Gdk
         css_provider = Gtk.CssProvider()
         css_provider.load_from_data(CUSTOM_CSS.encode('utf-8'))
         Gtk.StyleContext.add_provider_for_display(
@@ -482,9 +531,53 @@ class PikapikaApp(Adw.Application):
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
         )
 
+    # ---- Toast ----
+
+    def _show_toast(self, message, timeout=3):
+        toast = Adw.Toast(title=message, timeout=timeout)
+        self.toast_overlay.add_toast(toast)
+
+    # ---- Config / Remember Directory ----
+
+    def _remember_directory(self, path):
+        """Save directory to config. If path is a file, saves parent directory."""
+        p = Path(path)
+        directory = str(p if p.is_dir() else p.parent)
+        config = _load_config()
+        config['last_directory'] = directory
+        _save_config(config)
+
+    def _get_last_directory_file(self):
+        config = _load_config()
+        last_dir = config.get('last_directory')
+        if last_dir and os.path.isdir(last_dir):
+            return Gio.File.new_for_path(last_dir)
+        return None
+
+    def _set_dialog_initial_folder(self, dialog):
+        folder = self._get_last_directory_file()
+        if folder:
+            dialog.set_initial_folder(folder)
+
+    # ---- File Validation ----
+
+    def _validate_file(self, filepath, need_write=False):
+        """Check file exists and is accessible. Returns error message or None."""
+        if not os.path.isfile(filepath):
+            return f'File not found: {Path(filepath).name}'
+        if not os.access(filepath, os.R_OK):
+            return f'Cannot read: {Path(filepath).name}'
+        if need_write and not os.access(filepath, os.W_OK):
+            return f'Cannot write: {Path(filepath).name}'
+        return None
+
     # ---- Navigation ----
 
-    def _navigate(self, page_name):
+    def _navigate(self, page_name, push_history=True):
+        if push_history:
+            current = self.stack.get_visible_child_name()
+            if current and current != page_name:
+                self._nav_history.append(current)
         is_home = page_name == 'welcome'
         self.btn_back.set_visible(not is_home)
         self.title_label.set_label('Pikapika' if is_home else
@@ -496,8 +589,15 @@ class PikapikaApp(Adw.Application):
                                     'compare': 'Compare Metadata'}.get(page_name, 'Pikapika'))
         self.stack.set_visible_child_name(page_name)
 
+    def _go_back(self):
+        if self._nav_history:
+            self._navigate(self._nav_history.pop(), push_history=False)
+        else:
+            self._navigate('welcome', push_history=False)
+
     def _go_home(self):
-        self._navigate('welcome')
+        self._nav_history.clear()
+        self._navigate('welcome', push_history=False)
 
     # ---- Welcome Page ----
 
@@ -572,6 +672,12 @@ class PikapikaApp(Adw.Application):
         cards_grid.append(top_row)
         cards_grid.append(bottom_row)
         page.append(cards_grid)
+
+        # Drag-and-drop on welcome page
+        drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_target.connect('drop', self._on_welcome_drop)
+        page.add_controller(drop_target)
+
         return page
 
     # ---- View Metadata Page ----
@@ -669,39 +775,78 @@ class PikapikaApp(Adw.Application):
         self.btn_strip_selected.connect('clicked', lambda _b: self._on_strip_selected())
         page.append(self.btn_strip_selected)
 
+        # Drag-and-drop on view-metadata page
+        drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_target.connect('drop', self._on_view_drop)
+        page.add_controller(drop_target)
+
         return page
 
-    # ---- View Result Page ----
+    # ---- View Result Page (with before/after removed fields) ----
 
     def _build_view_result_page(self):
         page = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
+            spacing=0,
+        )
+
+        # Top section: icon + message
+        top_section = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
             halign=Gtk.Align.CENTER,
-            valign=Gtk.Align.CENTER,
             spacing=16,
+            margin_top=24,
         )
 
         self.view_result_icon = Gtk.Label()
-        self.view_result_icon.set_markup('<span size="xxx-large">\u2714</span>')
-        page.append(self.view_result_icon)
+        self.view_result_icon.set_markup('<span size="30000">\u2714</span>')
+        top_section.append(self.view_result_icon)
 
         self.view_result_label = Gtk.Label(label='')
         self.view_result_label.add_css_class('title-2')
         self.view_result_label.set_wrap(True)
         self.view_result_label.set_max_width_chars(45)
         self.view_result_label.set_justify(Gtk.Justification.CENTER)
-        page.append(self.view_result_label)
+        top_section.append(self.view_result_label)
 
         self.view_result_detail = Gtk.Label(label='')
         self.view_result_detail.add_css_class('dim-label')
         self.view_result_detail.set_wrap(True)
         self.view_result_detail.set_max_width_chars(50)
         self.view_result_detail.set_justify(Gtk.Justification.CENTER)
-        page.append(self.view_result_detail)
+        top_section.append(self.view_result_detail)
+
+        page.append(top_section)
+
+        # Removed fields section (hidden by default)
+        self.removed_fields_heading = Gtk.Label(
+            label='Removed Fields',
+            halign=Gtk.Align.START,
+            margin_top=16, margin_start=20, margin_bottom=4,
+        )
+        self.removed_fields_heading.add_css_class('heading')
+        self.removed_fields_heading.set_visible(False)
+        page.append(self.removed_fields_heading)
+
+        self.removed_fields_scroll = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            margin_top=4, margin_bottom=8, margin_start=16, margin_end=16,
+        )
+        self.removed_fields_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=4,
+            margin_top=4, margin_bottom=4, margin_start=4, margin_end=4,
+        )
+        self.removed_fields_scroll.set_child(self.removed_fields_list)
+        self.removed_fields_scroll.set_visible(False)
+        page.append(self.removed_fields_scroll)
 
         btn_home = Gtk.Button(label='Back to Home')
         btn_home.add_css_class('suggested-action')
         btn_home.add_css_class('pill')
+        btn_home.set_margin_bottom(16)
+        btn_home.set_halign(Gtk.Align.CENTER)
         btn_home.connect('clicked', lambda _b: self._go_home())
         page.append(btn_home)
 
@@ -757,6 +902,11 @@ class PikapikaApp(Adw.Application):
         self.btn_strip_all.connect('clicked', lambda _b: self._on_strip_all_confirm())
         page.append(self.btn_strip_all)
 
+        # Drag-and-drop on strip-confirm page
+        drop_target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        drop_target.connect('drop', self._on_strip_confirm_drop)
+        page.add_controller(drop_target)
+
         return page
 
     # ---- Strip Result Page ----
@@ -795,11 +945,51 @@ class PikapikaApp(Adw.Application):
 
         return page
 
+    # ---- Drag-and-Drop Handlers ----
+
+    def _on_welcome_drop(self, target, value, x, y):
+        files = value.get_files()
+        paths = [f.get_path() for f in files if f.get_path()]
+        if not paths:
+            return False
+        if len(paths) == 1:
+            self.current_file = paths[0]
+            self._remember_directory(paths[0])
+            self._load_metadata(paths[0])
+        else:
+            self.strip_files = paths
+            self._remember_directory(paths[0])
+            self._populate_strip_file_list()
+            self._navigate('strip-confirm')
+        return True
+
+    def _on_view_drop(self, target, value, x, y):
+        files = value.get_files()
+        if files:
+            path = files[0].get_path()
+            if path:
+                self.current_file = path
+                self._remember_directory(path)
+                self._load_metadata(path)
+                return True
+        return False
+
+    def _on_strip_confirm_drop(self, target, value, x, y):
+        files = value.get_files()
+        paths = [f.get_path() for f in files if f.get_path()]
+        if not paths:
+            return False
+        self.strip_files.extend(paths)
+        self._remember_directory(paths[0])
+        self._populate_strip_file_list()
+        return True
+
     # ---- View Metadata Flow ----
 
     def _on_view_metadata(self):
         dialog = Gtk.FileDialog()
         dialog.set_title('Select a file to inspect')
+        self._set_dialog_initial_folder(dialog)
         dialog.open(self.win, None, self._on_view_file_chosen)
 
     def _on_view_file_chosen(self, dialog, result):
@@ -808,10 +998,21 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         path = gfile.get_path()
+        self._remember_directory(path)
         self.current_file = path
         self._load_metadata(path)
 
     def _load_metadata(self, filepath):
+        # Pre-flight validation
+        error = self._validate_file(filepath)
+        if error:
+            self.view_file_info.set_label(Path(filepath).name)
+            self.view_mime_label.set_label('')
+            self._clear_meta_list()
+            self._navigate('view-metadata')
+            self._show_meta_error(error)
+            return
+
         self.view_file_info.set_label(Path(filepath).name)
         self.view_mime_label.set_label('')
         self._clear_meta_list()
@@ -915,6 +1116,30 @@ class PikapikaApp(Adw.Application):
         for check in self.meta_checks.values():
             check.set_active(state)
 
+    # ---- Before/After Helper ----
+
+    def _compute_removed_fields(self, filepath, pre_meta):
+        """Re-read metadata after strip and return dict of fields that were removed."""
+        try:
+            parser, _ = parser_factory.get_parser(filepath)
+            if parser is None:
+                return pre_meta
+            meta = parser.get_meta()
+            flat = {}
+            for k, v in meta.items():
+                if isinstance(v, dict):
+                    for sk, sv in v.items():
+                        flat[f'{k}.{sk}'] = str(sv)
+                else:
+                    flat[k] = str(v)
+            removed = {}
+            for k, v in pre_meta.items():
+                if k not in flat:
+                    removed[k] = v
+            return removed
+        except Exception:
+            return pre_meta
+
     # ---- Selective Strip ----
 
     def _on_strip_selected(self):
@@ -942,27 +1167,42 @@ class PikapikaApp(Adw.Application):
             return
 
         filepath = self.current_file
+
+        # Pre-flight validation
+        error = self._validate_file(filepath, need_write=True)
+        if error:
+            self._show_view_result(False, 'Cannot strip', error)
+            return
+
+        # If all fields selected, use mat2 for complete removal
+        # (exiftool can't delete protected/permanent/ICC tags individually)
+        all_selected = len(selected) == len(self.meta_checks)
+        if all_selected:
+            self._strip_file_mat2(filepath, show_view_result=True)
+            return
+
         has_exiftool = shutil.which('exiftool') is not None
 
         if not has_exiftool:
             self._offer_mat2_fallback()
             return
 
+        pre_strip_meta = dict(self.current_meta)
+
         def worker():
             try:
-                # Build exiftool args to strip selected tags
+                # Build exiftool args with smarter tag mapping
                 args = ['exiftool', '-overwrite_original']
                 for key in selected:
-                    # Normalize key: remove prefixes like "Exif." etc.
-                    tag = key.split('.')[-1] if '.' in key else key
-                    args.append(f'-{tag}=')
+                    args.append(_mat2_key_to_exiftool_arg(key))
                 args.append(filepath)
 
                 proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
                 if proc.returncode == 0:
+                    removed = self._compute_removed_fields(filepath, pre_strip_meta)
                     GLib.idle_add(self._show_view_result, True,
                                   f'Stripped {len(selected)} field(s)',
-                                  Path(filepath).name)
+                                  Path(filepath).name, removed)
                 else:
                     GLib.idle_add(self._show_view_result, False,
                                   'exiftool error',
@@ -994,6 +1234,16 @@ class PikapikaApp(Adw.Application):
         self._strip_file_mat2(self.current_file, show_view_result=True)
 
     def _strip_file_mat2(self, filepath, show_view_result=False):
+        # Pre-flight validation
+        error = self._validate_file(filepath, need_write=True)
+        if error:
+            if show_view_result:
+                self._show_view_result(False, 'Cannot strip', error)
+                return
+            return False, filepath, error
+
+        pre_strip_meta = dict(self.current_meta) if show_view_result else None
+
         def worker():
             try:
                 parser, mtype = parser_factory.get_parser(filepath)
@@ -1009,7 +1259,9 @@ class PikapikaApp(Adw.Application):
                     shutil.move(output, filepath)
                     msg = 'All metadata removed'
                     if show_view_result:
-                        GLib.idle_add(self._show_view_result, True, msg, Path(filepath).name)
+                        removed = self._compute_removed_fields(filepath, pre_strip_meta)
+                        GLib.idle_add(self._show_view_result, True, msg,
+                                      Path(filepath).name, removed)
                     return True, filepath, msg
                 else:
                     msg = 'mat2 failed to clean file'
@@ -1027,18 +1279,45 @@ class PikapikaApp(Adw.Application):
         else:
             return worker()
 
-    def _show_view_result(self, success, message, detail):
+    def _show_view_result(self, success, message, detail, removed_fields=None):
         if success:
-            self.view_result_icon.set_markup('<span size="xxx-large" foreground="#34d399">\u2714</span>')
+            self.view_result_icon.set_markup('<span size="30000" foreground="#34d399">\u2714</span>')
             self.view_result_label.set_label(message)
             self.view_result_label.remove_css_class('error')
             self.view_result_label.add_css_class('result-success')
         else:
-            self.view_result_icon.set_markup('<span size="xxx-large" foreground="#f87171">\u2718</span>')
+            self.view_result_icon.set_markup('<span size="30000" foreground="#f87171">\u2718</span>')
             self.view_result_label.set_label(message)
             self.view_result_label.remove_css_class('result-success')
             self.view_result_label.add_css_class('result-fail')
         self.view_result_detail.set_label(detail)
+
+        # Populate removed fields section
+        while child := self.removed_fields_list.get_first_child():
+            self.removed_fields_list.remove(child)
+
+        if removed_fields:
+            self.removed_fields_heading.set_visible(True)
+            self.removed_fields_scroll.set_visible(True)
+            for key, value in removed_fields.items():
+                row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+                row.add_css_class('meta-row')
+                key_label = Gtk.Label(label=key, halign=Gtk.Align.START)
+                key_label.add_css_class('meta-key')
+                key_label.set_size_request(180, -1)
+                key_label.set_ellipsize(Pango.EllipsizeMode.END)
+                key_label.set_xalign(0)
+                row.append(key_label)
+                val_label = Gtk.Label(label=value, halign=Gtk.Align.START, hexpand=True)
+                val_label.add_css_class('meta-value')
+                val_label.set_ellipsize(Pango.EllipsizeMode.END)
+                val_label.set_xalign(0)
+                row.append(val_label)
+                self.removed_fields_list.append(row)
+        else:
+            self.removed_fields_heading.set_visible(False)
+            self.removed_fields_scroll.set_visible(False)
+
         self._navigate('view-result')
 
     # ---- Strip Metadata Flow ----
@@ -1046,6 +1325,7 @@ class PikapikaApp(Adw.Application):
     def _on_strip_metadata(self):
         dialog = Gtk.FileDialog()
         dialog.set_title('Select files to strip')
+        self._set_dialog_initial_folder(dialog)
         dialog.open_multiple(self.win, None, self._on_strip_files_chosen)
 
     def _on_strip_files_chosen(self, dialog, result):
@@ -1064,6 +1344,7 @@ class PikapikaApp(Adw.Application):
         if not self.strip_files:
             return
 
+        self._remember_directory(self.strip_files[0])
         self._populate_strip_file_list()
         self._navigate('strip-confirm')
 
@@ -1113,6 +1394,11 @@ class PikapikaApp(Adw.Application):
         def worker():
             results = []
             for filepath in files:
+                # Pre-flight validation
+                error = self._validate_file(filepath, need_write=True)
+                if error:
+                    results.append((False, filepath, error))
+                    continue
                 try:
                     parser, mtype = parser_factory.get_parser(filepath)
                     if parser is None:
@@ -1169,6 +1455,7 @@ class PikapikaApp(Adw.Application):
             return
         dialog = Gtk.FileDialog()
         dialog.set_title('Save metadata as JSON')
+        self._set_dialog_initial_folder(dialog)
         stem = Path(self.current_file).stem
         dialog.set_initial_name(f'{stem}_metadata.json')
         dialog.save(self.win, None, self._on_export_save)
@@ -1179,6 +1466,7 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         path = gfile.get_path()
+        self._remember_directory(path)
         export = {
             'file': self.current_file,
             'metadata': self.current_meta,
@@ -1195,6 +1483,7 @@ class PikapikaApp(Adw.Application):
     def _on_folder_audit(self):
         dialog = Gtk.FileDialog()
         dialog.set_title('Select a folder to audit')
+        self._set_dialog_initial_folder(dialog)
         dialog.select_folder(self.win, None, self._on_audit_folder_chosen)
 
     def _on_audit_folder_chosen(self, dialog, result):
@@ -1203,6 +1492,7 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         folder = gfile.get_path()
+        self._remember_directory(folder)
         self._navigate('audit')
         self._run_audit(folder)
 
@@ -1242,6 +1532,16 @@ class PikapikaApp(Adw.Application):
         self.audit_progress_label.set_visible(False)
         page.append(self.audit_progress_label)
 
+        # Cancel button (visible during scan)
+        self.btn_audit_cancel = Gtk.Button(label='Cancel Scan')
+        self.btn_audit_cancel.add_css_class('destructive-action')
+        self.btn_audit_cancel.add_css_class('pill')
+        self.btn_audit_cancel.set_halign(Gtk.Align.CENTER)
+        self.btn_audit_cancel.set_margin_top(8)
+        self.btn_audit_cancel.set_visible(False)
+        self.btn_audit_cancel.connect('clicked', lambda _b: self._cancel_audit())
+        page.append(self.btn_audit_cancel)
+
         # Scrollable results
         scrolled = Gtk.ScrolledWindow(
             vexpand=True,
@@ -1275,8 +1575,24 @@ class PikapikaApp(Adw.Application):
         self.btn_audit_export.connect('clicked', lambda _b: self._on_audit_export())
         btn_row.append(self.btn_audit_export)
 
+        self.btn_audit_strip = Gtk.Button(label='Strip All Dirty Files')
+        self.btn_audit_strip.add_css_class('destructive-action')
+        self.btn_audit_strip.add_css_class('pill')
+        self.btn_audit_strip.set_sensitive(False)
+        self.btn_audit_strip.connect('clicked', lambda _b: self._on_audit_batch_strip())
+        btn_row.append(self.btn_audit_strip)
+
+        self.btn_audit_rescan = Gtk.Button(label='Re-scan Folder')
+        self.btn_audit_rescan.add_css_class('pill')
+        self.btn_audit_rescan.set_sensitive(False)
+        self.btn_audit_rescan.connect('clicked', lambda _b: self._on_audit_rescan())
+        btn_row.append(self.btn_audit_rescan)
+
         page.append(btn_row)
         return page
+
+    def _cancel_audit(self):
+        self._audit_cancel.set()
 
     def _run_audit(self, folder):
         # Clear previous
@@ -1290,16 +1606,25 @@ class PikapikaApp(Adw.Application):
         self.audit_progress_label.set_visible(True)
         self.audit_progress_label.set_label('Scanning...')
         self.btn_audit_export.set_sensitive(False)
+        self.btn_audit_strip.set_sensitive(False)
+        self.btn_audit_cancel.set_visible(True)
+        self._audit_cancel.clear()
         self.audit_results = []
 
         def worker():
             results = []
-            files = [f for f in Path(folder).rglob('*') if f.is_file()]
-            total = len(files)
-            for i, filepath in enumerate(files):
-                if i % 10 == 0:
+            count = 0
+            # Lazy rglob: iterate generator instead of eager list
+            for filepath in Path(folder).rglob('*'):
+                if self._audit_cancel.is_set():
+                    GLib.idle_add(self._show_audit_results, results, folder, True)
+                    return
+                if not filepath.is_file():
+                    continue
+                count += 1
+                if count % 10 == 0:
                     GLib.idle_add(self.audit_progress_label.set_label,
-                                  f'Scanning {i+1}/{total}...')
+                                  f'Scanning... ({count} files processed)')
                 try:
                     parser, mtype = parser_factory.get_parser(str(filepath))
                     if parser is None:
@@ -1307,27 +1632,31 @@ class PikapikaApp(Adw.Application):
                         continue
                     meta = parser.get_meta()
                     # Flatten
-                    count = 0
+                    field_count = 0
                     for k, v in meta.items():
                         if isinstance(v, dict):
-                            count += len(v)
+                            field_count += len(v)
                         else:
-                            count += 1
-                    if count > 0:
-                        results.append((str(filepath), 'dirty', mtype, count))
+                            field_count += 1
+                    if field_count > 0:
+                        results.append((str(filepath), 'dirty', mtype, field_count))
                     else:
                         results.append((str(filepath), 'clean', mtype, 0))
                 except Exception:
                     results.append((str(filepath), 'unsupported', None, 0))
-            GLib.idle_add(self._show_audit_results, results, folder)
+            GLib.idle_add(self._show_audit_results, results, folder, False)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_audit_results(self, results, folder):
+    def _show_audit_results(self, results, folder, was_cancelled=False):
         self.audit_spinner.stop()
         self.audit_spinner.set_visible(False)
         self.audit_progress_label.set_visible(False)
+        self.btn_audit_cancel.set_visible(False)
         self.audit_results = results
+
+        if was_cancelled:
+            self._show_toast('Scan cancelled \u2014 showing partial results')
 
         dirty = [r for r in results if r[1] == 'dirty']
         clean = [r for r in results if r[1] == 'clean']
@@ -1401,6 +1730,16 @@ class PikapikaApp(Adw.Application):
             self.audit_list.append(row)
 
         self.btn_audit_export.set_sensitive(True)
+        self.btn_audit_rescan.set_sensitive(True)
+
+        # Enable batch strip if there are dirty files
+        self._audit_dirty_files = [r[0] for r in dirty]
+        self.btn_audit_strip.set_sensitive(len(dirty) > 0)
+
+    def _on_audit_rescan(self):
+        folder = self.audit_folder_label.get_label()
+        if folder:
+            self._run_audit(folder)
 
     def _on_audit_row_double_click(self, gesture, n_press, x, y, filepath):
         if n_press == 2:
@@ -1412,6 +1751,7 @@ class PikapikaApp(Adw.Application):
             return
         dialog = Gtk.FileDialog()
         dialog.set_title('Save audit report as JSON')
+        self._set_dialog_initial_folder(dialog)
         dialog.set_initial_name('audit_report.json')
         dialog.save(self.win, None, self._on_audit_export_save)
 
@@ -1421,6 +1761,7 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         path = gfile.get_path()
+        self._remember_directory(path)
         report = {
             'folder': self.audit_folder_label.get_label(),
             'files': [
@@ -1431,8 +1772,60 @@ class PikapikaApp(Adw.Application):
         try:
             with open(path, 'w') as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+            self._show_toast('Audit report exported')
+        except Exception as e:
+            self._show_toast(f'Export failed: {e}')
+
+    # ---- Batch Strip from Audit ----
+
+    def _on_audit_batch_strip(self):
+        if not self._audit_dirty_files:
+            return
+        count = len(self._audit_dirty_files)
+        dialog = Adw.AlertDialog(
+            heading='Strip all dirty files?',
+            body=f'This will permanently remove all metadata from {count} file(s). This cannot be undone.',
+        )
+        dialog.add_response('cancel', 'Cancel')
+        dialog.add_response('strip', 'Strip All')
+        dialog.set_response_appearance('strip', Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response('cancel')
+        dialog.set_close_response('cancel')
+        dialog.choose(self.win, None, self._on_audit_batch_strip_response)
+
+    def _on_audit_batch_strip_response(self, dialog, result):
+        try:
+            response = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if response != 'strip':
+            return
+
+        files = list(self._audit_dirty_files)
+
+        def worker():
+            results = []
+            for filepath in files:
+                error = self._validate_file(filepath, need_write=True)
+                if error:
+                    results.append((False, filepath, error))
+                    continue
+                try:
+                    parser, mtype = parser_factory.get_parser(filepath)
+                    if parser is None:
+                        results.append((False, filepath, f'Unsupported: {mtype or "unknown"}'))
+                        continue
+                    success = parser.remove_all()
+                    if success:
+                        shutil.move(parser.output_filename, filepath)
+                        results.append((True, filepath, 'All metadata removed'))
+                    else:
+                        results.append((False, filepath, 'mat2 failed to clean'))
+                except Exception as e:
+                    results.append((False, filepath, str(e)))
+            GLib.idle_add(self._show_strip_results, results)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---- Compare Metadata ----
 
@@ -1441,6 +1834,7 @@ class PikapikaApp(Adw.Application):
         self.compare_file_b = None
         dialog = Gtk.FileDialog()
         dialog.set_title('Select first file')
+        self._set_dialog_initial_folder(dialog)
         dialog.open(self.win, None, self._on_compare_file_a_chosen)
 
     def _on_compare_file_a_chosen(self, dialog, result):
@@ -1449,8 +1843,10 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         self.compare_file_a = gfile.get_path()
+        self._remember_directory(self.compare_file_a)
         dialog2 = Gtk.FileDialog()
         dialog2.set_title('Select second file')
+        self._set_dialog_initial_folder(dialog2)
         dialog2.open(self.win, None, self._on_compare_file_b_chosen)
 
     def _on_compare_file_b_chosen(self, dialog, result):
@@ -1459,6 +1855,7 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         self.compare_file_b = gfile.get_path()
+        self._remember_directory(self.compare_file_b)
         self._navigate('compare')
         self._run_compare()
 
@@ -1488,19 +1885,38 @@ class PikapikaApp(Adw.Application):
         page.append(self.compare_header_box)
         page.append(Gtk.Separator())
 
-        # Legend
-        legend = Gtk.Box(
+        # Column header row (Field | file_a | file_b)
+        self.compare_col_header = Gtk.Box(
             orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=16,
-            halign=Gtk.Align.CENTER,
-            margin_top=8, margin_bottom=4,
+            spacing=8, homogeneous=True,
+            margin_top=8, margin_bottom=4, margin_start=16, margin_end=16,
         )
-        for label, css_cls in [('Different', 'compare-diff'), ('Only in A', 'compare-only-a'),
-                                ('Only in B', 'compare-only-b'), ('Same', 'compare-same')]:
-            lbl = Gtk.Label(label=f'\u25cf {label}')
-            lbl.add_css_class(css_cls)
-            legend.append(lbl)
-        page.append(legend)
+        self._col_hdr_field = Gtk.Label(label='Field', halign=Gtk.Align.FILL, hexpand=True)
+        self._col_hdr_field.set_xalign(0)
+        self._col_hdr_field.add_css_class('dim-label')
+        self._col_hdr_a = Gtk.Label(label='', halign=Gtk.Align.FILL, hexpand=True)
+        self._col_hdr_a.set_xalign(0)
+        self._col_hdr_a.add_css_class('dim-label')
+        self._col_hdr_b = Gtk.Label(label='', halign=Gtk.Align.FILL, hexpand=True)
+        self._col_hdr_b.set_xalign(0)
+        self._col_hdr_b.add_css_class('dim-label')
+        self.compare_col_header.append(self._col_hdr_field)
+        self.compare_col_header.append(self._col_hdr_a)
+        self.compare_col_header.append(self._col_hdr_b)
+        page.append(self.compare_col_header)
+
+        # Hide Identical toggle
+        toggle_row = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            halign=Gtk.Align.CENTER,
+            margin_top=4, margin_bottom=4,
+        )
+        self.btn_hide_same = Gtk.ToggleButton(label='Hide Identical')
+        self.btn_hide_same.add_css_class('pill')
+        self.btn_hide_same.set_active(False)
+        self.btn_hide_same.connect('toggled', self._on_toggle_hide_same)
+        toggle_row.append(self.btn_hide_same)
+        page.append(toggle_row)
 
         # Spinner
         self.compare_spinner = Gtk.Spinner(halign=Gtk.Align.CENTER, margin_top=8)
@@ -1544,16 +1960,28 @@ class PikapikaApp(Adw.Application):
         page.append(btn_row)
         return page
 
+    def _on_toggle_hide_same(self, btn):
+        hide = btn.get_active()
+        for row, status in self._compare_rows:
+            if status == 'same':
+                row.set_visible(not hide)
+
     def _run_compare(self):
         while child := self.compare_list.get_first_child():
             self.compare_list.remove(child)
 
-        self.compare_label_a.set_label(Path(self.compare_file_a).name)
-        self.compare_label_b.set_label(Path(self.compare_file_b).name)
+        name_a = Path(self.compare_file_a).name
+        name_b = Path(self.compare_file_b).name
+        self.compare_label_a.set_label(name_a)
+        self.compare_label_b.set_label(name_b)
+        self._col_hdr_a.set_label(name_a)
+        self._col_hdr_b.set_label(name_b)
         self.compare_spinner.set_visible(True)
         self.compare_spinner.start()
         self.btn_compare_export.set_sensitive(False)
+        self.btn_hide_same.set_active(False)
         self.compare_diff_data = {}
+        self._compare_rows = []
 
         def _get_flat_meta(filepath):
             parser, mtype = parser_factory.get_parser(filepath)
@@ -1616,51 +2044,48 @@ class PikapikaApp(Adw.Application):
         order = {'diff': 0, 'only_a': 1, 'only_b': 2, 'same': 3}
         diff_data.sort(key=lambda x: order[x[3]])
 
+        self._compare_rows = []
+
         for key, val_a, val_b, status in diff_data:
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, homogeneous=True)
             row.add_css_class('meta-row')
 
-            # Key label with status color
-            key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            status_dot = Gtk.Label()
-            css = {'diff': 'compare-diff', 'only_a': 'compare-only-a',
-                   'only_b': 'compare-only-b', 'same': 'compare-same'}[status]
-            status_dot.set_markup(f'<span foreground="">●</span>')
-            status_dot.add_css_class(css)
-            key_row.append(status_dot)
-
-            key_lbl = Gtk.Label(label=key, halign=Gtk.Align.START)
+            # Column 1: field name
+            key_lbl = Gtk.Label(label=key, halign=Gtk.Align.FILL, hexpand=True)
+            key_lbl.set_wrap(True)
+            key_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            key_lbl.set_xalign(0)
             key_lbl.add_css_class('meta-key')
-            key_row.append(key_lbl)
-            row.append(key_row)
+            row.append(key_lbl)
 
-            # Values side by side
-            vals_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-
-            a_lbl = Gtk.Label(label=val_a or '\u2014', halign=Gtk.Align.START, hexpand=True)
-            a_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+            # Column 2: value from image 1
+            a_lbl = Gtk.Label(label=val_a or '\u2014', halign=Gtk.Align.FILL, hexpand=True)
+            a_lbl.set_wrap(True)
+            a_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
             a_lbl.set_xalign(0)
-            if status == 'only_b':
-                a_lbl.add_css_class('dim-label')
-            else:
+            if status == 'same':
                 a_lbl.add_css_class('meta-value')
-            vals_row.append(a_lbl)
-
-            sep = Gtk.Label(label='\u2502')
-            sep.add_css_class('dim-label')
-            vals_row.append(sep)
-
-            b_lbl = Gtk.Label(label=val_b or '\u2014', halign=Gtk.Align.START, hexpand=True)
-            b_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            b_lbl.set_xalign(0)
-            if status == 'only_a':
-                b_lbl.add_css_class('dim-label')
+            elif status == 'diff':
+                a_lbl.add_css_class('meta-value')
             else:
-                b_lbl.add_css_class('meta-value')
-            vals_row.append(b_lbl)
+                a_lbl.add_css_class('dim-label')
+            row.append(a_lbl)
 
-            row.append(vals_row)
+            # Column 3: value from image 2
+            b_lbl = Gtk.Label(label=val_b or '\u2014', halign=Gtk.Align.FILL, hexpand=True)
+            b_lbl.set_wrap(True)
+            b_lbl.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            b_lbl.set_xalign(0)
+            if status == 'same':
+                b_lbl.add_css_class('meta-value')
+            elif status == 'diff':
+                b_lbl.add_css_class('compare-diff')
+            else:
+                b_lbl.add_css_class('dim-label')
+            row.append(b_lbl)
+
             self.compare_list.append(row)
+            self._compare_rows.append((row, status))
 
         self.btn_compare_export.set_sensitive(True)
 
@@ -1669,6 +2094,7 @@ class PikapikaApp(Adw.Application):
             return
         dialog = Gtk.FileDialog()
         dialog.set_title('Save comparison as JSON')
+        self._set_dialog_initial_folder(dialog)
         dialog.set_initial_name('metadata_diff.json')
         dialog.save(self.win, None, self._on_compare_export_save)
 
@@ -1678,6 +2104,7 @@ class PikapikaApp(Adw.Application):
         except GLib.Error:
             return
         path = gfile.get_path()
+        self._remember_directory(path)
         report = {
             'file_a': self.compare_file_a,
             'file_b': self.compare_file_b,
@@ -1689,8 +2116,9 @@ class PikapikaApp(Adw.Application):
         try:
             with open(path, 'w') as f:
                 json.dump(report, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+            self._show_toast('Comparison exported')
+        except Exception as e:
+            self._show_toast(f'Export failed: {e}')
 
 
 def main():
