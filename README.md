@@ -14,6 +14,7 @@
 | **Strip Metadata** | Bulk-select multiple files, remove all metadata at once via mat2 |
 | **Folder Audit** | Recursively scan a directory and flag every file that contains metadata |
 | **Compare** | Side-by-side metadata diff of two files, colour-coded by status |
+| **Location Finder** | Extract GPS data from a photo and reverse-geocode the address in local language and English |
 
 - Selective field stripping powered by [exiftool](https://exiftool.org/)
 - Full metadata removal powered by [mat2](https://0xacab.org/jvoisin/mat2)
@@ -61,6 +62,10 @@ Select a directory to scan recursively. Every file is checked for metadata and c
 ### Compare Metadata
 
 Pick two files to diff. All metadata keys are shown side-by-side, colour-coded: yellow for different values, pink for only-in-A, cyan for only-in-B, grey for identical. Exportable as JSON.
+
+### Location Finder
+
+Select an image to check for embedded GPS coordinates. If found, the location is reverse-geocoded via OpenStreetMap/Nominatim and displayed in both the local language and English. From the result you can go straight to stripping all metadata from the file.
 
 ## Dependencies
 
