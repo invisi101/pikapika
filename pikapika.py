@@ -510,6 +510,7 @@ class PikapikaApp(Adw.Application):
         self.stack.add_named(self._build_audit_page(), 'audit')
         self.stack.add_named(self._build_compare_page(), 'compare')
         self.stack.add_named(self._build_location_page(), 'location')
+        self.stack.add_named(self._build_about_metadata_page(), 'about-metadata')
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.append(self.header)
@@ -675,6 +676,10 @@ class PikapikaApp(Adw.Application):
             '<span size="xx-large" weight="bold">\U0001f4cd</span>',
             'Location Finder', 'Find where a photo was taken from GPS data',
             self._on_location_finder))
+        bottom_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\u2139</span>',
+            'About Metadata', 'Learn what metadata is and why it matters',
+            self._on_about_metadata))
 
         cards_grid.append(top_row)
         cards_grid.append(bottom_row)
@@ -2382,6 +2387,104 @@ class PikapikaApp(Adw.Application):
         self.strip_files = [filepath]
         self._populate_strip_file_list()
         self._navigate('strip-confirm')
+
+    # ---- About Metadata ----
+
+    _ABOUT_METADATA_SECTIONS = [
+        ('What is Metadata?',
+         'Every file you create carries invisible extra information alongside its '
+         'actual content. This is metadata \u2014 data about data. You can\'t see it by '
+         'opening the file normally, but it\'s there, and anyone who receives the '
+         'file can read it.'),
+        ('Photos and Images',
+         'Your phone or camera records things like GPS coordinates (the exact '
+         'location where the photo was taken), date and time down to the second '
+         'including timezone, device details such as camera make, model and '
+         'sometimes the serial number of your specific device, which software '
+         'was used to edit the photo, and embedded thumbnails \u2014 a small preview '
+         'image baked into the file, which some editing tools forget to update '
+         'when you crop or redact the main image.'),
+        ('Documents',
+         'PDFs, Word files and spreadsheets can include your author name (often '
+         'pulled automatically from your computer\'s user account), your organisation '
+         'or workplace name, revision history showing how many times the file was '
+         'edited and total editing time, the hostname of the computer it was created '
+         'on, and traces of comments and tracked changes even after you\'ve accepted them.'),
+        ('Audio and Video',
+         'Audio and video files may contain recording device info, GPS data, '
+         'software details, and duration and bitrate information.'),
+        ('Why Does This Matter?',
+         'Most of the time, metadata is harmless. But when you share files publicly '
+         'or with people you don\'t fully trust, it can reveal more than you intended. '
+         'A photo posted online might tell someone exactly where you live. A PDF sent '
+         'to a client might expose your personal name or an internal username. A '
+         'cropped image might still carry the original dimensions, hinting at what '
+         'was removed.\n\n'
+         'You don\'t need to be paranoid about metadata \u2014 but it\'s worth knowing it '
+         'exists, and having the option to remove it before sharing.'),
+        ('How Pikapika Helps',
+         'View Metadata \u2014 Open any supported file and see every metadata field it '
+         'contains. Select individual fields and strip only those, or export the '
+         'full list to JSON.\n\n'
+         'Strip Metadata \u2014 Select one or more files and remove all metadata at once.\n\n'
+         'Folder Audit \u2014 Scan a folder and see which files contain metadata and how '
+         'many fields each has.\n\n'
+         'Compare \u2014 Side-by-side metadata diff of two files, colour-coded to show '
+         'what\'s different.\n\n'
+         'Location Finder \u2014 Check a photo for embedded GPS data and see the address '
+         'where it was taken.\n\n'
+         '(In case you were wondering\u2026 pikapika is Japanese for squeaky clean.)'),
+    ]
+
+    def _build_about_metadata_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        heading = Gtk.Label(
+            label='About Metadata',
+            halign=Gtk.Align.START,
+            margin_top=12, margin_bottom=8, margin_start=20, margin_end=20,
+        )
+        heading.add_css_class('heading')
+        page.append(heading)
+
+        page.append(Gtk.Separator())
+
+        scrolled = Gtk.ScrolledWindow(
+            vexpand=True,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            margin_top=8, margin_bottom=8, margin_start=16, margin_end=16,
+        )
+        content = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=8, margin_bottom=8, margin_start=8, margin_end=8,
+        )
+
+        for title, body in self._ABOUT_METADATA_SECTIONS:
+            section = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+            title_label = Gtk.Label(label=title, halign=Gtk.Align.START)
+            title_label.add_css_class('title-4')
+            section.append(title_label)
+
+            body_label = Gtk.Label(
+                label=body,
+                halign=Gtk.Align.START,
+                wrap=True,
+                max_width_chars=80,
+                xalign=0,
+            )
+            section.append(body_label)
+
+            content.append(section)
+
+        scrolled.set_child(content)
+        page.append(scrolled)
+
+        return page
+
+    def _on_about_metadata(self):
+        self._navigate('about-metadata')
 
 
 def main():
