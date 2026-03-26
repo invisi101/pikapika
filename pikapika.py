@@ -294,7 +294,12 @@ dialog {
 
 .mode-card-subtitle {
     color: alpha(#c4c4f0, 0.6);
-    font-size: 12px;
+    font-size: 14px;
+}
+
+/* ---- About page ---- */
+.about-body {
+    font-size: 14px;
 }
 
 /* ---- Metadata rows ---- */
@@ -2474,6 +2479,7 @@ class PikapikaApp(Adw.Application):
                 max_width_chars=80,
                 xalign=0,
             )
+            body_label.add_css_class('about-body')
             section.append(body_label)
 
             content.append(section)
