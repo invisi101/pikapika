@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import threading
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 import gi
@@ -264,9 +266,9 @@ dialog {
     background-color: #1a1a2e;
     border: 1px solid alpha(#818cf8, 0.2);
     border-radius: 16px;
-    padding: 26px 20px;
+    padding: 18px 14px;
     transition: all 200ms ease;
-    min-width: 200px;
+    min-width: 160px;
 }
 
 .mode-card:hover {
@@ -280,19 +282,19 @@ dialog {
 }
 
 .mode-card-icon {
-    font-size: 48px;
-    margin-bottom: 8px;
+    font-size: 36px;
+    margin-bottom: 4px;
 }
 
 .mode-card-title {
     color: #e0e0ff;
     font-weight: 700;
-    font-size: 18px;
+    font-size: 15px;
 }
 
 .mode-card-subtitle {
     color: alpha(#c4c4f0, 0.6);
-    font-size: 14px;
+    font-size: 12px;
 }
 
 /* ---- Metadata rows ---- */
@@ -507,6 +509,7 @@ class PikapikaApp(Adw.Application):
         self.stack.add_named(self._build_strip_result_page(), 'strip-result')
         self.stack.add_named(self._build_audit_page(), 'audit')
         self.stack.add_named(self._build_compare_page(), 'compare')
+        self.stack.add_named(self._build_location_page(), 'location')
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         vbox.append(self.header)
@@ -626,14 +629,14 @@ class PikapikaApp(Adw.Application):
             vexpand=True,
         )
 
-        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=16)
-        bottom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=16)
+        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=12)
+        bottom_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, halign=Gtk.Align.CENTER, spacing=12)
 
         def _make_card(icon_markup, title, subtitle, callback):
             card = Gtk.Button()
             card.add_css_class('mode-card')
             card.set_has_frame(False)
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8,
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6,
                           halign=Gtk.Align.CENTER)
             icon = Gtk.Label()
             icon.add_css_class('mode-card-icon')
@@ -645,7 +648,7 @@ class PikapikaApp(Adw.Application):
             s = Gtk.Label(label=subtitle)
             s.add_css_class('mode-card-subtitle')
             s.set_wrap(True)
-            s.set_max_width_chars(22)
+            s.set_max_width_chars(18)
             s.set_justify(Gtk.Justification.CENTER)
             box.append(s)
             card.set_child(box)
@@ -660,7 +663,7 @@ class PikapikaApp(Adw.Application):
             '<span size="xx-large" weight="bold">\u2702</span>',
             'Strip Metadata', 'Remove all metadata from one or more files',
             self._on_strip_metadata))
-        bottom_row.append(_make_card(
+        top_row.append(_make_card(
             '<span size="xx-large" weight="bold">\U0001f4c1</span>',
             'Folder Audit', 'Scan a folder for files containing metadata',
             self._on_folder_audit))
@@ -668,6 +671,10 @@ class PikapikaApp(Adw.Application):
             '<span size="xx-large" weight="bold">\u2194</span>',
             'Compare', 'Side-by-side metadata diff of two files',
             self._on_compare_metadata))
+        bottom_row.append(_make_card(
+            '<span size="xx-large" weight="bold">\U0001f4cd</span>',
+            'Location Finder', 'Find where a photo was taken from GPS data',
+            self._on_location_finder))
 
         cards_grid.append(top_row)
         cards_grid.append(bottom_row)
@@ -2119,6 +2126,262 @@ class PikapikaApp(Adw.Application):
             self._show_toast('Comparison exported')
         except Exception as e:
             self._show_toast(f'Export failed: {e}')
+
+    # ---- Location Finder ----
+
+    def _build_location_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        # File info bar
+        self.loc_file_info = Gtk.Label(
+            label='',
+            halign=Gtk.Align.START,
+            margin_top=12, margin_bottom=8, margin_start=20, margin_end=20,
+        )
+        self.loc_file_info.add_css_class('heading')
+        self.loc_file_info.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        page.append(self.loc_file_info)
+
+        page.append(Gtk.Separator())
+
+        # Spinner
+        self.loc_spinner = Gtk.Spinner(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self.loc_spinner.set_size_request(32, 32)
+        self.loc_spinner.set_visible(False)
+        page.append(self.loc_spinner)
+
+        # Center content area
+        center_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=16,
+            halign=Gtk.Align.CENTER,
+            valign=Gtk.Align.CENTER,
+            vexpand=True,
+            margin_start=24, margin_end=24,
+        )
+
+        self.loc_icon = Gtk.Label()
+        self.loc_icon.set_markup('<span size="30000">\U0001f4cd</span>')
+        center_box.append(self.loc_icon)
+
+        self.loc_result_label = Gtk.Label(label='')
+        self.loc_result_label.add_css_class('title-2')
+        self.loc_result_label.set_wrap(True)
+        self.loc_result_label.set_max_width_chars(50)
+        self.loc_result_label.set_justify(Gtk.Justification.CENTER)
+        center_box.append(self.loc_result_label)
+
+        self.loc_address_label = Gtk.Label(label='')
+        self.loc_address_label.set_wrap(True)
+        self.loc_address_label.set_max_width_chars(60)
+        self.loc_address_label.set_justify(Gtk.Justification.CENTER)
+        self.loc_address_label.set_selectable(True)
+        center_box.append(self.loc_address_label)
+
+        self.loc_address_en_label = Gtk.Label(label='')
+        self.loc_address_en_label.set_wrap(True)
+        self.loc_address_en_label.set_max_width_chars(60)
+        self.loc_address_en_label.set_justify(Gtk.Justification.CENTER)
+        self.loc_address_en_label.set_selectable(True)
+        self.loc_address_en_label.set_margin_top(4)
+        center_box.append(self.loc_address_en_label)
+
+        self.loc_coords_label = Gtk.Label(label='')
+        self.loc_coords_label.add_css_class('dim-label')
+        self.loc_coords_label.set_selectable(True)
+        center_box.append(self.loc_coords_label)
+
+        page.append(center_box)
+
+        # Bottom buttons
+        btn_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=12,
+            halign=Gtk.Align.CENTER,
+            margin_bottom=16, margin_start=20, margin_end=20,
+        )
+
+        self.loc_btn_strip = Gtk.Button(label='Strip Metadata')
+        self.loc_btn_strip.add_css_class('destructive-action')
+        self.loc_btn_strip.add_css_class('pill')
+        self.loc_btn_strip.set_visible(False)
+        self.loc_btn_strip.connect('clicked', lambda _b: self._on_location_strip())
+        btn_box.append(self.loc_btn_strip)
+
+        self.loc_btn_home = Gtk.Button(label='Back to Home')
+        self.loc_btn_home.add_css_class('pill')
+        self.loc_btn_home.set_visible(False)
+        self.loc_btn_home.connect('clicked', lambda _b: self._go_home())
+        btn_box.append(self.loc_btn_home)
+
+        page.append(btn_box)
+
+        return page
+
+    def _on_location_finder(self):
+        dialog = Gtk.FileDialog()
+        dialog.set_title('Select an image')
+        self._set_dialog_initial_folder(dialog)
+        img_filter = Gtk.FileFilter()
+        img_filter.set_name('Images')
+        for pattern in ('*.jpg', '*.jpeg', '*.png', '*.tiff', '*.tif',
+                        '*.heic', '*.heif', '*.webp', '*.bmp', '*.gif'):
+            img_filter.add_pattern(pattern)
+            img_filter.add_pattern(pattern.upper())
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(img_filter)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(img_filter)
+        dialog.open(self.win, None, self._on_location_file_chosen)
+
+    def _on_location_file_chosen(self, dialog, result):
+        try:
+            gfile = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        filepath = gfile.get_path()
+        if not filepath:
+            return
+        self._remember_directory(filepath)
+        self._location_file = filepath
+        self.loc_file_info.set_label(Path(filepath).name)
+
+        # Reset UI
+        self.loc_icon.set_markup('<span size="30000">\U0001f4cd</span>')
+        self.loc_result_label.set_label('')
+        self.loc_address_label.set_label('')
+        self.loc_address_en_label.set_label('')
+        self.loc_coords_label.set_label('')
+        self.loc_btn_strip.set_visible(False)
+        self.loc_btn_home.set_visible(False)
+        self.loc_spinner.set_visible(True)
+        self.loc_spinner.start()
+        self._navigate('location')
+
+        threading.Thread(target=self._location_worker, args=(filepath,), daemon=True).start()
+
+    def _location_worker(self, filepath):
+        """Extract GPS from exiftool and reverse-geocode via Nominatim."""
+        try:
+            proc = subprocess.run(
+                ['exiftool', '-json', '-GPS:GPSLatitude', '-GPS:GPSLongitude',
+                 '-GPS:GPSLatitudeRef', '-GPS:GPSLongitudeRef', filepath],
+                capture_output=True, text=True, timeout=10,
+            )
+            data = json.loads(proc.stdout)
+            if not data:
+                GLib.idle_add(self._show_location_result, None, None, None, None)
+                return
+
+            info = data[0]
+            lat_str = info.get('GPSLatitude', '')
+            lon_str = info.get('GPSLongitude', '')
+
+            if not lat_str or not lon_str:
+                GLib.idle_add(self._show_location_result, None, None, None, None)
+                return
+
+            lat = self._dms_to_decimal(lat_str, info.get('GPSLatitudeRef', 'N'))
+            lon = self._dms_to_decimal(lon_str, info.get('GPSLongitudeRef', 'E'))
+
+            if lat is None or lon is None:
+                GLib.idle_add(self._show_location_result, None, None, None, None)
+                return
+
+            # Reverse geocode — local language
+            base_url = (
+                f'https://nominatim.openstreetmap.org/reverse'
+                f'?format=jsonv2&lat={lat}&lon={lon}&zoom=18&addressdetails=1'
+            )
+            headers = {
+                'User-Agent': 'Pikapika/1.0 (metadata viewer)',
+                'Accept': 'application/json',
+            }
+            req = urllib.request.Request(base_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                geo_local = json.loads(resp.read().decode())
+            address_local = geo_local.get('display_name', f'{lat}, {lon}')
+
+            # Reverse geocode — English
+            url_en = base_url + '&accept-language=en'
+            req_en = urllib.request.Request(url_en, headers=headers)
+            with urllib.request.urlopen(req_en, timeout=10) as resp:
+                geo_en = json.loads(resp.read().decode())
+            address_en = geo_en.get('display_name', '')
+
+            # If both are identical, no need to show twice
+            if address_en == address_local:
+                address_en = ''
+
+            GLib.idle_add(self._show_location_result, lat, lon, address_local, address_en)
+
+        except Exception as e:
+            GLib.idle_add(self._show_location_error, str(e))
+
+    @staticmethod
+    def _dms_to_decimal(dms_str, ref):
+        """Convert exiftool DMS string like '35 deg 42\\' 28.21\"' to decimal."""
+        import re
+        # Try parsing as a plain float first (exiftool sometimes returns decimal)
+        try:
+            val = float(dms_str)
+            if ref in ('S', 'W'):
+                val = -val
+            return val
+        except (ValueError, TypeError):
+            pass
+        # Parse DMS: e.g. "35 deg 42' 28.21\""
+        m = re.match(
+            r"(\d+)\s*deg\s*(\d+)'\s*([\d.]+)\"?",
+            dms_str.strip(),
+        )
+        if not m:
+            return None
+        d, mins, secs = float(m.group(1)), float(m.group(2)), float(m.group(3))
+        val = d + mins / 60 + secs / 3600
+        if ref in ('S', 'W'):
+            val = -val
+        return val
+
+    def _show_location_result(self, lat, lon, address, address_en):
+        self.loc_spinner.stop()
+        self.loc_spinner.set_visible(False)
+
+        if lat is None:
+            self.loc_icon.set_markup('<span size="30000" foreground="#f87171">\u2718</span>')
+            self.loc_result_label.set_label('No GPS data was found in the image')
+            self.loc_address_label.set_label('')
+            self.loc_address_en_label.set_label('')
+            self.loc_coords_label.set_label('')
+            self.loc_btn_strip.set_visible(False)
+            self.loc_btn_home.set_visible(True)
+            return
+
+        self.loc_icon.set_markup('<span size="30000" foreground="#34d399">\U0001f4cd</span>')
+        self.loc_result_label.set_label('Photo location found')
+        self.loc_address_label.set_label(address)
+        self.loc_address_en_label.set_label(address_en or '')
+        self.loc_coords_label.set_label(f'{lat:.6f}, {lon:.6f}')
+        self.loc_btn_strip.set_visible(True)
+        self.loc_btn_home.set_visible(True)
+
+    def _show_location_error(self, message):
+        self.loc_spinner.stop()
+        self.loc_spinner.set_visible(False)
+        self.loc_icon.set_markup('<span size="30000" foreground="#f87171">\u2718</span>')
+        self.loc_result_label.set_label('Error')
+        self.loc_address_label.set_label(message)
+        self.loc_coords_label.set_label('')
+        self.loc_btn_strip.set_visible(False)
+        self.loc_btn_home.set_visible(True)
+
+    def _on_location_strip(self):
+        filepath = getattr(self, '_location_file', None)
+        if not filepath:
+            return
+        self.strip_files = [filepath]
+        self._populate_strip_file_list()
+        self._navigate('strip-confirm')
 
 
 def main():
